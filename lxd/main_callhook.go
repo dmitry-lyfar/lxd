@@ -131,7 +131,13 @@ func applyCDIHooksToContainer(devicesRootFolder string, hooksFilePath string) er
 	// Updating the linker cache
 	l := len(hooks.LDCacheUpdates)
 	if l > 0 {
-		ldConfFilePath := containerRootFSMount + "/etc/ld.so.conf.d/" + customCDILinkerConfFile
+		ldConfDirPath := filepath.Join(containerRootFSMount, "etc", "ld.so.conf.d")
+		err = os.MkdirAll(ldConfDirPath, 0755)
+		if err != nil {
+			return fmt.Errorf("Failed to create the linker conf directory at %q: %w\n", ldConfDirPath, err)
+		}
+
+		ldConfFilePath := filepath.Join(ldConfDirPath, customCDILinkerConfFile)
 		_, err = os.Stat(ldConfFilePath)
 		if err == nil {
 			// The file already exists. Read it first, analyze its entries
@@ -185,7 +191,7 @@ func applyCDIHooksToContainer(devicesRootFolder string, hooksFilePath string) er
 	}
 
 	// Then remove the linker cache and regenerate it
-	linkerCachePath := filepath.Join(containerRootFSMount, "/etc/ld.so.cache")
+	linkerCachePath := filepath.Join(containerRootFSMount, "etc", "ld.so.cache")
 	err = os.Remove(linkerCachePath)
 	if err != nil {
 		if !os.IsNotExist(err) {
@@ -196,9 +202,15 @@ func applyCDIHooksToContainer(devicesRootFolder string, hooksFilePath string) er
 	}
 
 	// Run `ldconfig` on the HOST (but targeting the container rootFS) to reduce the risk of running untrusted code in the container.
-	err = exec.Command("/sbin/ldconfig", "-r", containerRootFSMount).Run()
-	if err != nil {
-		return fmt.Errorf("Failed to run ldconfig in the container rootfs: %w\n", err)
+	// Allow tests and other environments to skip this step by setting LXD_SKIP_LDCONFIG=1.
+	if os.Getenv("LXD_SKIP_LDCONFIG") != "1" {
+		ldexec := exec.Command("/sbin/ldconfig", "-r", containerRootFSMount)
+		output, err := ldexec.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("Failed to run ldconfig in the container rootfs: %w (%s)", err, string(output))
+		}
+	} else {
+		fmt.Println("Skipping ldconfig due to LXD_SKIP_LDCONFIG environment variable")
 	}
 
 	return nil

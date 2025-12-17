@@ -2394,6 +2394,12 @@ func (d *lxc) Start(stateful bool) error {
 			}
 		}
 
+		if lxcLog != "" {
+			lxcLog = strings.TrimSpace(lxcLog)
+			ctxMap["lxcLog"] = lxcLog
+			err = fmt.Errorf("%w\n%s", err, lxcLog)
+		}
+
 		d.logger.Error("Failed starting instance", ctxMap)
 
 		// Use this context timeout to wait for potential stop operation to complete in case instance start fails.

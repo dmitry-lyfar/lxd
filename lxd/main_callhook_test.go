@@ -1,7 +1,9 @@
 package main
 
 import (
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -106,5 +108,42 @@ func TestResolveTargetRelativeToLink(t *testing.T) {
 
 			assert.Equal(t, tc.expected, result, "Unexpected result value %q for link=%q and target=%q", result, tc.link, tc.target)
 		})
+	}
+}
+
+func TestApplyCDIHooksCreatesLDConf(t *testing.T) {
+	// Prepare temporary devices root and container rootfs
+	devicesRoot := t.TempDir()
+	containerRoot := t.TempDir()
+
+	// Ensure env vars are set for the function
+	t.Setenv("LXC_ROOTFS_MOUNT", containerRoot)
+	// Skip running ldconfig in tests
+	t.Setenv("LXD_SKIP_LDCONFIG", "1")
+
+	// Create a hooks file with a single LD cache update
+	hooksFileName := "test_cdi_hooks.json"
+	hooksFilePath := filepath.Join(devicesRoot, hooksFileName)
+	content := `{"ld_cache_updates":["/opt/test/lib"]}`
+	if err := os.WriteFile(hooksFilePath, []byte(content), 0644); err != nil {
+		t.Fatalf("failed to write hooks file: %v", err)
+	}
+
+	// Run the function under test
+	if err := applyCDIHooksToContainer(devicesRoot, hooksFileName); err != nil {
+		t.Fatalf("applyCDIHooksToContainer failed: %v", err)
+	}
+
+	// Check that the ld.so.conf.d directory and file were created and contain the entry
+	ldConfDir := filepath.Join(containerRoot, "etc", "ld.so.conf.d")
+	ldConfFile := filepath.Join(ldConfDir, customCDILinkerConfFile)
+
+	data, err := os.ReadFile(ldConfFile)
+	if err != nil {
+		t.Fatalf("failed to read ld conf file: %v", err)
+	}
+
+	if !strings.Contains(string(data), "/opt/test/lib") {
+		t.Fatalf("ld conf file does not contain expected entry; got: %q", string(data))
 	}
 }

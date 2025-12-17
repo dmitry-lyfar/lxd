@@ -12,10 +12,10 @@ import (
 	"strings"
 
 	"github.com/NVIDIA/nvidia-container-toolkit/pkg/nvcdi"
+	"go.yaml.in/yaml/v2"
 	"tags.cncf.io/container-device-interface/specs-go"
 
 	"github.com/canonical/lxd/lxd/instance"
-	"github.com/canonical/lxd/lxd/state"
 	"github.com/canonical/lxd/shared"
 	"github.com/canonical/lxd/shared/logger"
 )
@@ -42,7 +42,7 @@ func defaultNvidiaTegraCSVFiles(rootPath string) []string {
 }
 
 // generateNvidiaSpec generates a CDI spec for an Nvidia vendor.
-func generateNvidiaSpec(s *state.State, cdiID ID, inst instance.Instance) (*specs.Spec, error) {
+func generateNvidiaSpec(isCore bool, cdiID ID, inst instance.Instance) (*specs.Spec, error) {
 	l := logger.AddContext(logger.Ctx{"instanceName": inst.Name(), "projectName": inst.Project().Name, "cdiID": cdiID.String()})
 	mode := nvcdi.ModeAuto
 	if cdiID.Class == IGPU {
@@ -67,7 +67,7 @@ func generateNvidiaSpec(s *state.State, cdiID ID, inst instance.Instance) (*spec
 	rootPath := ""
 	devRootPath := ""
 	configSearchPaths := []string{}
-	if s.OS.InUbuntuCore() {
+	if isCore {
 		devRootPath = "/"
 
 		gpuCore24Root := os.Getenv("SNAP") + "/gpu-2404"
@@ -156,11 +156,52 @@ func generateNvidiaSpec(s *state.State, cdiID ID, inst instance.Instance) (*spec
 	return spec, nil
 }
 
+func generateAmdSpec(isCore bool, cdiID ID, inst instance.Instance) (*specs.Spec, error) {
+	l := logger.AddContext(logger.Ctx{"instanceName": inst.Name(), "projectName": inst.Project().Name, "cdiID": cdiID.String()})
+
+	amdCTKPath, err := exec.LookPath("amd-ctk")
+	if err != nil {
+		return nil, fmt.Errorf("Failed to find the amd-ctk binary: %w", err)
+	}
+
+	// No stdout support, not custom file name support from amd-ctk...
+	specFile := filepath.Join(inst.LogPath(), "amd.json")
+
+	cmd := []string{
+		amdCTKPath,
+		"cdi",
+		"generate",
+		"--output",
+		specFile,
+	}
+
+	_, err = shared.RunCommandContext(context.TODO(), cmd[0], cmd[1:]...)
+	if err != nil {
+		return nil, fmt.Errorf("Failed to generate AMD CDI spec: %w", err)
+	}
+	l.Debug("CDI spec has been successfully generated", logger.Ctx{"specPath": specFile})
+
+	specRaw, err := os.ReadFile(specFile)
+	if err != nil {
+		return nil, fmt.Errorf("Failed to read AMD CDI spec: %w", err)
+	}
+
+	var spec specs.Spec
+	err = yaml.Unmarshal([]byte(specRaw), &spec)
+	if err != nil {
+		return nil, fmt.Errorf("Failed to unmarshal AMD CDI spec: %w", err)
+	}
+
+	return &spec, nil
+}
+
 // generateSpec generates a CDI spec for the given CDI ID.
-func generateSpec(s *state.State, cdiID ID, inst instance.Instance) (*specs.Spec, error) {
+var generateSpec = func(isCore bool, cdiID ID, inst instance.Instance) (*specs.Spec, error) {
 	switch cdiID.Vendor {
 	case NVIDIA:
-		return generateNvidiaSpec(s, cdiID, inst)
+		return generateNvidiaSpec(isCore, cdiID, inst)
+	case AMD:
+		return generateAmdSpec(isCore, cdiID, inst)
 	default:
 		return nil, fmt.Errorf("Unsupported CDI vendor (%q) for the spec generation", cdiID.Vendor)
 	}

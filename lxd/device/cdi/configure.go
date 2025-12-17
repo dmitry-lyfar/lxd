@@ -14,9 +14,7 @@ import (
 	"tags.cncf.io/container-device-interface/specs-go"
 
 	"github.com/canonical/lxd/lxd/instance"
-	"github.com/canonical/lxd/lxd/state"
 	"github.com/canonical/lxd/shared"
-	"github.com/canonical/lxd/shared/logger"
 )
 
 // specDevToNativeDev builds a list of unix-char devices to be created from a CDI spec.
@@ -47,10 +45,6 @@ func specDevToNativeDev(configDevices *ConfigDevices, d specs.DeviceNode) error 
 
 // specMountToNativeDev builds a list of disk mounts to be created from a CDI spec.
 func specMountToNativeDev(configDevices *ConfigDevices, cdiID ID, mounts []*specs.Mount) ([]SymlinkEntry, error) {
-	if len(mounts) == 0 {
-		return nil, errors.New("CDI mounts are empty")
-	}
-
 	indirectSymlinks := make([]SymlinkEntry, 0)
 	var chosenOpts []string
 
@@ -134,9 +128,8 @@ func specMountToNativeDev(configDevices *ConfigDevices, cdiID ID, mounts []*spec
 
 // specHookToLXDCDIHook will translate a hook from a CDI spec into an entry in a `Hooks`.
 // Some CDI hooks are not relevant for LXD and will be ignored.
-func specHookToLXDCDIHook(hook *specs.Hook, hooks *Hooks, l logger.Logger) error {
+func specHookToLXDCDIHook(hook *specs.Hook, hooks *Hooks) error {
 	if hook == nil {
-		l.Warn("CDI hook is nil")
 		return nil
 	}
 
@@ -238,13 +231,11 @@ func specHookToLXDCDIHook(hook *specs.Hook, hooks *Hooks, l logger.Logger) error
 
 // applyContainerEdits updates the configDevices and the hooks with CDI "container edits"
 // (edits are user space libraries to mount and char device to pass to the container).
-func applyContainerEdits(edits specs.ContainerEdits, configDevices *ConfigDevices, hooks *Hooks, existingMounts []*specs.Mount, l logger.Logger) ([]*specs.Mount, error) {
+func applyContainerEdits(edits specs.ContainerEdits, configDevices *ConfigDevices, hooks *Hooks) ([]*specs.Mount, error) {
 	for _, d := range edits.DeviceNodes {
 		if d == nil {
-			l.Warn("One CDI DeviceNode is nil")
 			continue
 		}
-
 		err := specDevToNativeDev(configDevices, *d)
 		if err != nil {
 			return nil, err
@@ -252,13 +243,13 @@ func applyContainerEdits(edits specs.ContainerEdits, configDevices *ConfigDevice
 	}
 
 	for _, hook := range edits.Hooks {
-		err := specHookToLXDCDIHook(hook, hooks, l)
+		err := specHookToLXDCDIHook(hook, hooks)
 		if err != nil {
 			return nil, err
 		}
 	}
 
-	return append(existingMounts, edits.Mounts...), nil
+	return edits.Mounts, nil
 }
 
 // GenerateFromCDI does several things:
@@ -281,9 +272,9 @@ func applyContainerEdits(edits specs.ContainerEdits, configDevices *ConfigDevice
 //  4. Now we process all the mounts we collected from the spec in order to turn them into disk devices.
 //     This operations generate a side effect: it generates a list of indirect symlinks (see `specMountToNativeDev`)
 //  5. Merge all the hooks (direct + indirect) into a single list of hooks.
-func GenerateFromCDI(s *state.State, inst instance.Instance, cdiID ID, l logger.Logger) (*ConfigDevices, *Hooks, error) {
+func GenerateFromCDI(isCore bool, inst instance.Instance, cdiID ID) (*ConfigDevices, *Hooks, error) {
 	// 1. Generate the CDI specification
-	spec, err := generateSpec(s, cdiID, inst)
+	spec, err := generateSpec(isCore, cdiID, inst)
 	if err != nil {
 		return nil, nil, fmt.Errorf("Failed to generate CDI spec: %w", err)
 	}
@@ -294,46 +285,25 @@ func GenerateFromCDI(s *state.State, inst instance.Instance, cdiID ID, l logger.
 	configDevices := &ConfigDevices{UnixCharDevs: make([]map[string]string, 0), BindMounts: make([]map[string]string, 0)}
 
 	// 2. Process the specific device configuration
-	lookedUpDevs := make(map[string]struct{})
 	for _, device := range spec.Devices {
-		if cdiID.Name == All {
-			// When 'all' is selected as a CDI identifier,
-			// we should make the difference between CDI device index that are integer and the ones represented by a UUID
-			// that could contain the same cards. Having a lookup map avoid to add the same devices multiple times.
-			devToAdd := true
-			for _, devNode := range device.ContainerEdits.DeviceNodes {
-				_, ok := lookedUpDevs[devNode.Path]
-				if ok {
-					devToAdd = false
-					break
-				}
-
-				lookedUpDevs[devNode.Path] = struct{}{}
+		if device.Name == cdiID.Name {
+			newMounts, err := applyContainerEdits(device.ContainerEdits, configDevices, hooks)
+			if err != nil {
+				return nil, nil, err
 			}
 
-			if devToAdd {
-				mounts, err = applyContainerEdits(device.ContainerEdits, configDevices, hooks, mounts, l)
-				if err != nil {
-					return nil, nil, err
-				}
-			}
-		} else {
-			if device.Name == cdiID.Name {
-				mounts, err = applyContainerEdits(device.ContainerEdits, configDevices, hooks, mounts, l)
-				if err != nil {
-					return nil, nil, err
-				}
-
-				break
-			}
+			mounts = append(mounts, newMounts...)
+			break
 		}
 	}
 
 	// 3. Process general device configuration
-	mounts, err = applyContainerEdits(spec.ContainerEdits, configDevices, hooks, mounts, l)
+	newMounts, err := applyContainerEdits(spec.ContainerEdits, configDevices, hooks)
 	if err != nil {
 		return nil, nil, err
 	}
+
+	mounts = append(mounts, newMounts...)
 
 	// 4. Process the mounts
 	indirectSymlinks, err := specMountToNativeDev(configDevices, cdiID, mounts)
